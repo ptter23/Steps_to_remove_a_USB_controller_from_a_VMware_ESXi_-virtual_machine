@@ -1,2 +1,147 @@
 # Steps_to_remove_a_USB_controller_from_a_VMware_ESXi_-virtual_machine
 VMware fixes critical sandbox escape flaws in ESXi, Workstation, and Fusion
+Powercli Options
+The command below can be used to list all the virtual machines with a USB controller.
+Any VM reported should be investigated to determine if it can be safely removed
+Get-VM | ?{$_.ExtensionData.Config.Hardware.Device.DeviceInfo.Label -match "USB"} | Export-Csv -Path C:\mis\vulnerability_usb_old_vcenter_name_XXXX.csv -NoTypeInformation
+
+#Script To Remove USB controller from Virtual Machines
+#
+ 
+#Import PowerCLI modules
+Add-PSSnapIn VMware* -ErrorAction SilentlyContinue
+$ErrorActionPreference = "Stop"
+$errresult = 0
+
+
+#VC FQDN or IP Address variable
+#$VCFQDN = "x.x.x.x"
+$VCFQDN = Read-Host -Prompt "`nPlease enter vCenter Server IP or FQDN"
+
+#Array to store results
+$USBFinalCheck = @()
+
+#Result files names
+$FinalResultFilename = "C:\Temp\USB_Controller_Final_Result.csv"
+
+#Read Credentials and Connect to vCenter Server
+if (Test-Connection $VCFQDN -Count 1 -ErrorAction SilentlyContinue)
+{
+    $VCCredentials = Get-Credential -Message "Please Enter User Name and Password which has Administrator permission on vCenter Server" -UserName Administrator@vsphere.local
+    Connect-VIServer -Server $VCFQDN -Credential $VCCredentials
+}
+else
+{
+    write-host "VC FQDN or IP is Not Reachable, please retry with right entry"
+    Exit
+}
+
+# Get all VMs with a USB controller
+$VMs = Get-VM | ? {$_.ExtensionData.Config.Hardware.Device.DeviceInfo.Label -match "USB"}
+
+$ListofConnectedVMs = 0
+
+# Identify the number of Connected VMs with USB Controller
+$VMs | % { 
+       
+            if ($_.ExtensionData.Runtime.ConnectionState -eq "connected")
+            {
+                $ListofConnectedVMs = $ListofConnectedVMs+1
+            } 
+         }
+
+# User Confirmation to remove the USB Controllers
+$Confirmation = Read-Host -Prompt "`nScript will remove USB Controller from $ListofConnectedVMs VMs, please confirm with ('Y or Yes') to continue ?"
+
+if ($Confirmation -eq "y" -or $Confirmation -eq "Y" -or $Confirmation -eq "Yes" -or $Confirmation -eq "yes" -or $Confirmation -eq "YES" )
+{
+    echo "`nContinuing with the Script Execution as per user selection"    
+}
+else
+{
+    echo "`nTerminating the script based on user selection"
+    exit
+}
+
+#Now loop through that list and remove the controller from the VM
+foreach ($vmx in $VMs)
+{
+    if ($vmx.ExtensionData.Runtime.ConnectionState -eq "connected")
+    {
+        echo "Found VM $vmx with USB Controller"
+
+        $vmxv = $vmx | Get-View
+        $vmxv.Config.Hardware.Device | where {$_.DeviceInfo.Label -match "USB"} | %{
+            $myObj = "" | select Dev
+            $myObj.Dev = $_
+            $vmConfigSpec = New-Object VMware.Vim.VirtualMachineConfigSpec
+            $vmConfigSpec.DeviceChange += New-Object VMware.Vim.VirtualDeviceConfigSpec
+            $vmConfigSpec.DeviceChange[-1].device = $myObj.Dev
+            $vmConfigSpec.DeviceChange[-1].operation = "remove"
+            sleep 5
+            Write-Host "Removing USB Device From $vmx`n"
+			Try 
+			{
+			$vmxv.ReconfigVM($vmConfigSpec)
+			}
+			Catch
+			{
+			$_.exception.message
+			$errresult = 1
+			Write-Host "Error removing USB controller from $vmx`n*******************************`n"
+			} 
+			
+			If ($errresult -ne 1)
+			{
+			Write-Host "Removed USB controller from $vmx`n*******************************`n"
+			}
+			$errresult = 0
+			sleep 5
+         }
+    }
+}
+
+Write-Host "`nVerifying the USB Controller Status on Virtual Machines"
+
+#Verification of USB Controller post removal task
+sleep 10
+$VMs = Get-VM
+
+foreach ($vmx in $VMs)
+{
+    $USBResult = new-object PSObject
+    $USBResult | add-member -type NoteProperty -Name VMName -Value $vmx.Name
+    $USBResult | add-member -type NoteProperty -Name VMStatus -Value $vmx.ExtensionData.Runtime.ConnectionState
+    
+    if ($vmx.ExtensionData.Runtime.ConnectionState -eq "connected")
+    {
+        if ($vmx.ExtensionData.Config.Hardware.Device.DeviceInfo.Label -match "USB")
+        {
+            $USBResult | add-member -type NoteProperty -Name USB_Controller_Status -Value "Virtual Machine Has a USB controller configured"
+        }
+        else
+        {
+            $USBResult | add-member -type NoteProperty -Name USB_Controller_Status -Value "No USB Controller configured"
+        }
+    }
+    else
+    {
+        $USBResult | add-member -type NoteProperty -Name USB_Controller_Status -Value "Not Checked (VM Not in Connected State)"
+    }
+    
+    $USBFinalCheck+=$USBResult
+}
+
+try
+{
+    $USBFinalCheck | export-csv $FinalResultFilename -notype -ErrorAction Stop
+    Write-Host "`nPlease check the verification result of VMs with USB Controller - " $FinalResultFilename
+}
+
+catch
+{
+    $ResultFilename = "USB_Controller_Verification_Result" + (Get-Date).tostring("dd-MM-yyyy-hh-mm-ss") + ".csv"
+    $USBFinalCheck | export-csv $ResultFilename -notype
+    $result = Get-Item $ResultFilename
+    Write-Host "`nPlease check the verification result of VMs with USB Controller - " $result.fullname
+}
